@@ -1,0 +1,484 @@
+<title>Flowline Wind Tunnel</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+Condensed:wght@400;500;600&display=swap">
+<style>
+/* Layout: one-screen instrument. Slim header, the tunnel fills the middle, a wrapping control deck below. Deliberately single dark theme. */
+:root {
+  --bg: #0a1117;
+  --panel: #111b23;
+  --line: #22313d;
+  --fg: #dce8ef;
+  --muted: #7d92a1;
+  --accent: #5fd4c4;
+  --warn: #f0b44c;
+  --f-ui: "IBM Plex Sans Condensed", "Arial Narrow", system-ui, sans-serif;
+  --f-data: "IBM Plex Mono", ui-monospace, Consolas, monospace;
+  color-scheme: dark;
+}
+html, body { height: 100%; }
+body {
+  background: var(--bg); color: var(--fg); font-family: var(--f-ui); font-size: 14px;
+  display: flex; flex-direction: column; gap: 10px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 12px; box-sizing: border-box; overflow: hidden;
+}
+header { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; }
+h1 { font-size: 20px; font-weight: 600; letter-spacing: 0.02em; margin: 0; }
+h1 span { color: var(--accent); }
+.sub { color: var(--muted); margin: 0; }
+.readout { margin-left: auto; display: flex; gap: 14px; font-family: var(--f-data); font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.readout b { color: var(--fg); font-weight: 500; }
+
+#stage { position: relative; flex: 1; min-height: 180px; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; background: #071019; }
+#sim { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: none; cursor: crosshair; display: block; }
+#hint { position: absolute; left: 12px; top: 10px; font-family: var(--f-data); font-size: 12px; color: var(--fg); background: rgba(10,17,23,0.72); padding: 6px 9px; border-radius: 4px; pointer-events: none; transition: opacity .6s; }
+#inlet { position: absolute; left: 6px; bottom: 8px; font-family: var(--f-data); font-size: 11px; color: var(--muted); pointer-events: none; letter-spacing: .08em; }
+#toast { position: absolute; right: 12px; top: 10px; font-size: 13px; color: #1a1205; background: var(--warn); padding: 6px 10px; border-radius: 4px; pointer-events: none; }
+
+.deck { display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: center; }
+.group { display: flex; align-items: center; gap: 8px; }
+.label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 5px; overflow: hidden; }
+.seg button { border: 0; border-radius: 0; }
+.seg button + button { border-left: 1px solid var(--line); }
+button {
+  font: inherit; font-size: 13px; color: var(--fg); background: var(--panel);
+  border: 1px solid var(--line); border-radius: 5px; padding: 6px 11px; cursor: pointer;
+}
+button:hover { background: #18252f; }
+button[aria-pressed="true"] { background: var(--accent); color: #062420; }
+button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+input[type=range] { width: 96px; accent-color: var(--accent); }
+.val { font-family: var(--f-data); font-size: 12px; color: var(--fg); min-width: 3.2em; font-variant-numeric: tabular-nums; }
+@media (max-width: 560px) {
+  .sub { display: none; }
+  .readout { margin-left: 0; }
+  .deck { gap: 8px 12px; }
+  input[type=range] { width: 76px; }
+  button { padding: 6px 9px; }
+}
+</style>
+
+<header>
+  <h1>Flow<span>line</span></h1>
+  <p class="sub">Draw walls with your finger or mouse. Fluid enters from the left.</p>
+  <div class="readout">
+    <span>Re ≈ <b id="re">–</b></span>
+    <span>u₀ <b id="u0v">0.10</b></span>
+    <span><b id="fps">–</b> steps/frame</span>
+  </div>
+</header>
+
+<div id="stage">
+  <canvas id="sim" aria-label="Fluid simulation. Drag to draw walls."></canvas>
+  <div id="hint">Drag to draw a wall · switch to Erase to remove it</div>
+  <div id="inlet">INLET →</div>
+  <div id="toast" hidden></div>
+</div>
+
+<div class="deck">
+  <div class="group">
+    <div class="seg" role="group" aria-label="Tool">
+      <button id="tDraw" aria-pressed="true">Draw</button>
+      <button id="tErase" aria-pressed="false">Erase</button>
+    </div>
+    <label class="label" for="brush">Brush</label>
+    <input id="brush" type="range" min="1" max="8" step="1" value="3">
+  </div>
+  <div class="group">
+    <label class="label" for="speed">Flow</label>
+    <input id="speed" type="range" min="0.04" max="0.14" step="0.005" value="0.1">
+    <label class="label" for="visc">Viscosity</label>
+    <input id="visc" type="range" min="0.008" max="0.08" step="0.002" value="0.02">
+    <span class="val" id="viscv">0.020</span>
+  </div>
+  <div class="group">
+    <span class="label">View</span>
+    <div class="seg" role="group" aria-label="Color view">
+      <button id="vSpeed" aria-pressed="true">Speed</button>
+      <button id="vCurl" aria-pressed="false">Swirl</button>
+      <button id="vLines" aria-pressed="false">Lines</button>
+    </div>
+  </div>
+  <div class="group">
+    <span class="label">Shapes</span>
+    <div class="seg" role="group" aria-label="Preset shapes">
+      <button data-preset="cylinder">Cylinder</button>
+      <button data-preset="wing">Wing</button>
+      <button data-preset="venturi">Venturi</button>
+      <button data-preset="bank">Tube bank</button>
+    </div>
+  </div>
+  <div class="group">
+    <button id="play">Pause</button>
+    <button id="clear">Clear walls</button>
+  </div>
+</div>
+
+<script>
+(() => {
+  const C = document.getElementById('sim'), ctx = C.getContext('2d');
+  const stage = document.getElementById('stage');
+  const off = document.createElement('canvas'), octx = off.getContext('2d');
+  const trail = document.createElement('canvas'), tctx = trail.getContext('2d');
+  const mobile = matchMedia('(pointer: coarse)').matches || innerWidth < 700;
+
+  // ---------- Lattice Boltzmann D2Q9 ----------
+  let NX = 0, NY = 0, N = 0;
+  let n0, nN, nS, nE, nW, nNE, nSE, nNW, nSW, rho, ux, uy, curl, bar, img;
+  let u0 = 0.1, nu = 0.02, omega = 1 / (3 * nu + 0.5);
+  let unstable = false;
+
+  function alloc(nx, ny) {
+    NX = nx; NY = ny; N = NX * NY;
+    const F = () => new Float32Array(N);
+    n0 = F(); nN = F(); nS = F(); nE = F(); nW = F(); nNE = F(); nSE = F(); nNW = F(); nSW = F();
+    rho = F(); ux = F(); uy = F(); curl = F(); bar = new Uint8Array(N);
+    off.width = NX; off.height = NY; img = octx.createImageData(NX, NY);
+  }
+
+  function setEq(i, vx, vy, r) {
+    const ux3 = 3 * vx, uy3 = 3 * vy, ux2 = vx * vx, uy2 = vy * vy, uxuy2 = 2 * vx * vy,
+      u2 = ux2 + uy2, u215 = 1.5 * u2, a = r / 9, b = r / 36;
+    n0[i] = 4 / 9 * r * (1 - u215);
+    nE[i] = a * (1 + ux3 + 4.5 * ux2 - u215); nW[i] = a * (1 - ux3 + 4.5 * ux2 - u215);
+    nN[i] = a * (1 + uy3 + 4.5 * uy2 - u215); nS[i] = a * (1 - uy3 + 4.5 * uy2 - u215);
+    nNE[i] = b * (1 + ux3 + uy3 + 4.5 * (u2 + uxuy2) - u215);
+    nSE[i] = b * (1 + ux3 - uy3 + 4.5 * (u2 - uxuy2) - u215);
+    nNW[i] = b * (1 - ux3 + uy3 + 4.5 * (u2 - uxuy2) - u215);
+    nSW[i] = b * (1 - ux3 - uy3 + 4.5 * (u2 + uxuy2) - u215);
+    rho[i] = r; ux[i] = vx; uy[i] = vy;
+  }
+
+  function resetFluid() {
+    for (let i = 0; i < N; i++) bar[i] ? setEq(i, 0, 0, 1) : setEq(i, u0, 0, 1);
+  }
+
+  function boundaries() {
+    for (let x = 0; x < NX; x++) { setEq(x, u0, 0, 1); setEq(x + (NY - 1) * NX, u0, 0, 1); }
+    for (let y = 1; y < NY - 1; y++) { setEq(y * NX, u0, 0, 1); setEq(NX - 1 + y * NX, u0, 0, 1); }
+  }
+
+  function collide() {
+    const w = omega;
+    for (let y = 1; y < NY - 1; y++) {
+      for (let x = 1; x < NX - 1; x++) {
+        const i = x + y * NX;
+        if (bar[i]) { ux[i] = 0; uy[i] = 0; continue; }
+        const r = n0[i] + nN[i] + nS[i] + nE[i] + nW[i] + nNW[i] + nNE[i] + nSW[i] + nSE[i];
+        if (!(r > 0.05)) { unstable = true; continue; }
+        const vx = (nE[i] + nNE[i] + nSE[i] - nW[i] - nNW[i] - nSW[i]) / r;
+        const vy = (nN[i] + nNE[i] + nNW[i] - nS[i] - nSE[i] - nSW[i]) / r;
+        rho[i] = r; ux[i] = vx; uy[i] = vy;
+        const a = r / 9, b = r / 36, ux3 = 3 * vx, uy3 = 3 * vy, ux2 = vx * vx, uy2 = vy * vy,
+          uxuy2 = 2 * vx * vy, u2 = ux2 + uy2, u215 = 1.5 * u2;
+        if (u2 > 0.2) unstable = true;
+        n0[i] += w * (4 / 9 * r * (1 - u215) - n0[i]);
+        nE[i] += w * (a * (1 + ux3 + 4.5 * ux2 - u215) - nE[i]);
+        nW[i] += w * (a * (1 - ux3 + 4.5 * ux2 - u215) - nW[i]);
+        nN[i] += w * (a * (1 + uy3 + 4.5 * uy2 - u215) - nN[i]);
+        nS[i] += w * (a * (1 - uy3 + 4.5 * uy2 - u215) - nS[i]);
+        nNE[i] += w * (b * (1 + ux3 + uy3 + 4.5 * (u2 + uxuy2) - u215) - nNE[i]);
+        nSE[i] += w * (b * (1 + ux3 - uy3 + 4.5 * (u2 - uxuy2) - u215) - nSE[i]);
+        nNW[i] += w * (b * (1 - ux3 + uy3 + 4.5 * (u2 - uxuy2) - u215) - nNW[i]);
+        nSW[i] += w * (b * (1 - ux3 - uy3 + 4.5 * (u2 + uxuy2) - u215) - nSW[i]);
+      }
+    }
+    // open outflow on the right
+    for (let y = 1; y < NY - 1; y++) {
+      const i = NX - 1 + y * NX;
+      nW[i] = nW[i - 1]; nNW[i] = nNW[i - 1]; nSW[i] = nSW[i - 1];
+    }
+  }
+
+  function stream() {
+    for (let y = NY - 2; y > 0; y--) for (let x = 1; x < NX - 1; x++) {
+      const i = x + y * NX; nN[i] = nN[i - NX]; nNW[i] = nNW[i - NX + 1];
+    }
+    for (let y = NY - 2; y > 0; y--) for (let x = NX - 2; x > 0; x--) {
+      const i = x + y * NX; nE[i] = nE[i - 1]; nNE[i] = nNE[i - NX - 1];
+    }
+    for (let y = 1; y < NY - 1; y++) for (let x = NX - 2; x > 0; x--) {
+      const i = x + y * NX; nS[i] = nS[i + NX]; nSE[i] = nSE[i + NX - 1];
+    }
+    for (let y = 1; y < NY - 1; y++) for (let x = 1; x < NX - 1; x++) {
+      const i = x + y * NX; nW[i] = nW[i + 1]; nSW[i] = nSW[i + NX + 1];
+    }
+    // bounce-back off walls
+    for (let y = 1; y < NY - 1; y++) for (let x = 1; x < NX - 1; x++) {
+      const i = x + y * NX;
+      if (!bar[i]) continue;
+      nE[i + 1] = nW[i]; nW[i - 1] = nE[i]; nN[i + NX] = nS[i]; nS[i - NX] = nN[i];
+      nNE[i + NX + 1] = nSW[i]; nNW[i + NX - 1] = nSE[i];
+      nSE[i - NX + 1] = nNW[i]; nSW[i - NX - 1] = nNE[i];
+    }
+  }
+
+  function step() { boundaries(); collide(); stream(); }
+
+  function computeCurl() {
+    for (let y = 1; y < NY - 1; y++) for (let x = 1; x < NX - 1; x++) {
+      const i = x + y * NX;
+      curl[i] = uy[i + 1] - uy[i - 1] - ux[i + NX] + ux[i - NX];
+    }
+  }
+
+  // ---------- Color maps ----------
+  function lut(stops) {
+    const out = new Uint8Array(256 * 3);
+    for (let k = 0; k < 256; k++) {
+      const t = k / 255;
+      let j = 0; while (j < stops.length - 2 && t > stops[j + 1][0]) j++;
+      const [t0, c0] = stops[j], [t1, c1] = stops[j + 1], f = Math.min(1, Math.max(0, (t - t0) / (t1 - t0)));
+      for (let c = 0; c < 3; c++) out[k * 3 + c] = c0[c] + (c1[c] - c0[c]) * f;
+    }
+    return out;
+  }
+  const hex = h => [1, 3, 5].map(k => parseInt(h.slice(k, k + 2), 16));
+  const LUT_SPEED = lut([[0, hex('#060d14')], [0.3, hex('#0f3354')], [0.55, hex('#1d8a95')], [0.78, hex('#e3ae47')], [1, hex('#fff3d6')]]);
+  const LUT_CURL = lut([[0, hex('#4d8dff')], [0.3, hex('#16365e')], [0.5, hex('#091018')], [0.7, hex('#5e1c22')], [1, hex('#ff6a4f')]]);
+  const LUT_LINES = lut([[0, hex('#060c12')], [1, hex('#132433')]]);
+  const WALL = hex('#d5dfe6');
+
+  let view = 'speed';
+  function drawField() {
+    const d = img.data;
+    let map = LUT_SPEED, scale = 255 / (u0 * 1.9), centered = false;
+    if (view === 'curl') { computeCurl(); map = LUT_CURL; scale = 127 / (u0 * 0.45); centered = true; }
+    else if (view === 'lines') { map = LUT_LINES; }
+    for (let i = 0, p = 0; i < N; i++, p += 4) {
+      if (bar[i]) { d[p] = WALL[0]; d[p + 1] = WALL[1]; d[p + 2] = WALL[2]; d[p + 3] = 255; continue; }
+      let k = centered ? 128 + curl[i] * scale : Math.sqrt(ux[i] * ux[i] + uy[i] * uy[i]) * scale;
+      k = k < 0 ? 0 : k > 255 ? 255 : k | 0;
+      d[p] = map[k * 3]; d[p + 1] = map[k * 3 + 1]; d[p + 2] = map[k * 3 + 2]; d[p + 3] = 255;
+    }
+    octx.putImageData(img, 0, 0);
+  }
+
+  // ---------- Tracer particles ----------
+  const NP = mobile ? 1100 : 2200;
+  const px = new Float32Array(NP), py = new Float32Array(NP), age = new Float32Array(NP), life = new Float32Array(NP);
+  function spawn(k, anywhere) {
+    for (let tries = 0; tries < 12; tries++) {
+      const x = (anywhere || Math.random() > 0.55) ? 1 + Math.random() * (NX - 3) : 1 + Math.random() * 1.5;
+      const y = 1 + Math.random() * (NY - 3);
+      if (!bar[(x | 0) + (y | 0) * NX]) { px[k] = x; py[k] = y; break; }
+    }
+    age[k] = 0; life[k] = 90 + Math.random() * 200;
+  }
+  function sample(a, x, y) {
+    const x0 = x | 0, y0 = y | 0, fx = x - x0, fy = y - y0, i = x0 + y0 * NX;
+    return (a[i] * (1 - fx) + a[i + 1] * fx) * (1 - fy) + (a[i + NX] * (1 - fx) + a[i + NX + 1] * fx) * fy;
+  }
+  function moveParticles(steps) {
+    tctx.globalCompositeOperation = 'destination-out';
+    tctx.fillStyle = 'rgba(0,0,0,0.11)';
+    tctx.fillRect(0, 0, trail.width, trail.height);
+    tctx.globalCompositeOperation = 'source-over';
+    const sx = trail.width / NX, sy = trail.height / NY;
+    tctx.beginPath();
+    for (let k = 0; k < NP; k++) {
+      const x = px[k], y = py[k];
+      const nx = x + sample(ux, x, y) * steps, ny = y + sample(uy, x, y) * steps;
+      age[k]++;
+      if (nx < 1 || nx >= NX - 2 || ny < 1 || ny >= NY - 2 || bar[(nx | 0) + (ny | 0) * NX] || age[k] > life[k] || nx !== nx) {
+        spawn(k, false); continue;
+      }
+      tctx.moveTo(x * sx, y * sy); tctx.lineTo(nx * sx, ny * sy);
+      px[k] = nx; py[k] = ny;
+    }
+    tctx.strokeStyle = view === 'lines' ? 'rgba(150,235,225,0.85)' : 'rgba(240,248,252,0.75)';
+    tctx.lineWidth = Math.max(1, dpr * 0.9);
+    tctx.lineCap = 'round';
+    tctx.stroke();
+  }
+
+  // ---------- Shapes ----------
+  function fillWhere(test) {
+    for (let y = 1; y < NY - 1; y++) for (let x = 2; x < NX - 2; x++) if (test(x, y)) bar[x + y * NX] = 1;
+  }
+  const presets = {
+    cylinder() {
+      const cx = NX * 0.22, cy = NY * 0.5 + 0.7, r = Math.max(4, NY * 0.09);
+      fillWhere((x, y) => (x - cx) ** 2 + (y - cy) ** 2 <= r * r);
+    },
+    wing() {
+      const chord = Math.min(NX * 0.38, NY * 1.3), lx = NX * 0.2, ly = NY * 0.46, a = 0.2, c = Math.cos(a), s = Math.sin(a);
+      const m = 0.05, p = 0.4;
+      fillWhere((x, y) => {
+        const dx = x - lx, dy = y - ly;
+        const xl = (dx * c + dy * s) / chord, yl = (-dx * s + dy * c) / chord;
+        if (xl < 0 || xl > 1) return false;
+        const t = 0.6 * (0.2969 * Math.sqrt(xl) - 0.126 * xl - 0.3516 * xl * xl + 0.2843 * xl ** 3 - 0.1036 * xl ** 4);
+        const yc = xl < p ? -m / (p * p) * (2 * p * xl - xl * xl) : -m / ((1 - p) ** 2) * ((1 - 2 * p) + 2 * p * xl - xl * xl);
+        return Math.abs(yl - yc) <= t + 0.5 / chord;
+      });
+    },
+    venturi() {
+      const x0 = NX * 0.12, x1 = NX * 0.82, cy = NY / 2, th = Math.max(2, NY * 0.03);
+      fillWhere((x, y) => {
+        if (x < x0 || x > x1) return false;
+        const s = (x - x0) / (x1 - x0);
+        const g = NY * 0.36 - NY * 0.25 * 0.5 * (1 - Math.cos(2 * Math.PI * s));
+        const d = Math.abs(y - cy);
+        return d > g && d < g + th;
+      });
+    },
+    bank() {
+      const r = Math.max(3, NY * 0.055), rows = 5, gap = NY / (rows + 1);
+      const cols = [0.2, 0.3, 0.4, 0.5];
+      const circles = [];
+      cols.forEach((fx, ci) => {
+        const shift = ci % 2 ? gap / 2 : 0;
+        for (let j = 0; j <= rows; j++) {
+          const cy = gap * (j + 1) - shift;
+          if (cy > r + 2 && cy < NY - r - 2) circles.push([NX * fx, cy + 0.5]);
+        }
+      });
+      fillWhere((x, y) => circles.some(([cx, cy]) => (x - cx) ** 2 + (y - cy) ** 2 <= r * r));
+    }
+  };
+  let currentPreset = 'cylinder';
+  function loadPreset(name) {
+    bar.fill(0);
+    presets[name]();
+    currentPreset = name;
+    resetFluid();
+    for (let k = 0; k < NP; k++) spawn(k, true);
+    tctx.clearRect(0, 0, trail.width, trail.height);
+    updateRe();
+  }
+
+  // ---------- Readouts ----------
+  const reEl = document.getElementById('re'), u0El = document.getElementById('u0v'), fpsEl = document.getElementById('fps');
+  let obstacleL = 0;
+  function measureObstacle() {
+    let lo = NY, hi = -1;
+    for (let y = 1; y < NY - 1; y++) for (let x = 2; x < NX - 2; x++) if (bar[x + y * NX]) { if (y < lo) lo = y; if (y > hi) hi = y; break; }
+    obstacleL = hi >= lo ? hi - lo + 1 : 0;
+  }
+  function updateRe() {
+    measureObstacle();
+    reEl.textContent = obstacleL ? Math.round(u0 * obstacleL / nu) : '–';
+    u0El.textContent = u0.toFixed(3);
+  }
+
+  const toast = document.getElementById('toast');
+  let toastTimer = 0;
+  function say(msg) {
+    toast.textContent = msg; toast.hidden = false;
+    clearTimeout(toastTimer); toastTimer = setTimeout(() => toast.hidden = true, 3200);
+  }
+
+  // ---------- Sizing ----------
+  let dpr = 1, cssW = 0, cssH = 0;
+  function layout(first) {
+    const r = stage.getBoundingClientRect();
+    cssW = Math.max(100, r.width); cssH = Math.max(100, r.height);
+    dpr = Math.min(2, devicePixelRatio || 1);
+    C.width = trail.width = Math.round(cssW * dpr);
+    C.height = trail.height = Math.round(cssH * dpr);
+    const target = mobile ? 11000 : 22000;
+    const cell = Math.sqrt(cssW * cssH / target);
+    const nx = Math.max(60, Math.round(cssW / cell)), ny = Math.max(30, Math.round(cssH / cell));
+    if (first || Math.abs(nx - NX) / NX > 0.1 || Math.abs(ny - NY) / NY > 0.1) {
+      alloc(nx, ny);
+      loadPreset(currentPreset);
+    }
+  }
+  let resizeT = 0;
+  new ResizeObserver(() => { clearTimeout(resizeT); resizeT = setTimeout(() => layout(false), 150); }).observe(stage);
+
+  // ---------- Drawing input ----------
+  let tool = 'draw', brush = 3, drawing = false, last = null, hover = null, changed = false;
+  const hint = document.getElementById('hint');
+  function toGrid(e) {
+    const r = C.getBoundingClientRect();
+    return [(e.clientX - r.left) / r.width * NX, (e.clientY - r.top) / r.height * NY];
+  }
+  function stamp(gx, gy) {
+    const R = brush, cx = Math.round(gx), cy = Math.round(gy);
+    for (let dy = -R; dy <= R; dy++) for (let dx = -R; dx <= R; dx++) {
+      if (dx * dx + dy * dy > R * R + R * 0.5) continue;
+      const x = cx + dx, y = cy + dy;
+      if (x < 2 || x > NX - 3 || y < 1 || y > NY - 2) continue;
+      const i = x + y * NX;
+      if (tool === 'draw') { if (!bar[i]) { bar[i] = 1; setEq(i, 0, 0, 1); changed = true; } }
+      else if (bar[i]) { bar[i] = 0; setEq(i, 0, 0, 1); changed = true; }
+    }
+  }
+  function paint(a, b) {
+    const dist = Math.hypot(b[0] - a[0], b[1] - a[1]), n = Math.max(1, Math.ceil(dist / 0.6));
+    for (let k = 0; k <= n; k++) stamp(a[0] + (b[0] - a[0]) * k / n, a[1] + (b[1] - a[1]) * k / n);
+  }
+  C.addEventListener('pointerdown', e => {
+    C.setPointerCapture(e.pointerId);
+    drawing = true; changed = false; last = toGrid(e); hover = last; paint(last, last);
+    hint.style.opacity = 0;
+  });
+  C.addEventListener('pointermove', e => {
+    hover = toGrid(e);
+    if (drawing) { paint(last, hover); last = hover; }
+  });
+  const end = () => { if (drawing && changed) updateRe(); drawing = false; };
+  C.addEventListener('pointerup', end);
+  C.addEventListener('pointercancel', end);
+  C.addEventListener('pointerleave', () => { if (!drawing) hover = null; });
+
+  // ---------- Controls ----------
+  const $ = id => document.getElementById(id);
+  function pressGroup(ids, on) { ids.forEach(id => $(id).setAttribute('aria-pressed', id === on)); }
+  $('tDraw').onclick = () => { tool = 'draw'; pressGroup(['tDraw', 'tErase'], 'tDraw'); };
+  $('tErase').onclick = () => { tool = 'erase'; pressGroup(['tDraw', 'tErase'], 'tErase'); };
+  $('brush').oninput = e => brush = +e.target.value;
+  $('speed').oninput = e => { u0 = +e.target.value; updateRe(); };
+  $('visc').oninput = e => {
+    nu = +e.target.value; omega = 1 / (3 * nu + 0.5);
+    $('viscv').textContent = nu.toFixed(3); updateRe();
+  };
+  const views = { vSpeed: 'speed', vCurl: 'curl', vLines: 'lines' };
+  Object.keys(views).forEach(id => $(id).onclick = () => { view = views[id]; pressGroup(Object.keys(views), id); });
+  document.querySelectorAll('[data-preset]').forEach(b => b.onclick = () => loadPreset(b.dataset.preset));
+  let running = !matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const playBtn = $('play');
+  const syncPlay = () => playBtn.textContent = running ? 'Pause' : 'Play';
+  playBtn.onclick = () => { running = !running; syncPlay(); };
+  $('clear').onclick = () => { bar.fill(0); resetFluid(); updateRe(); };
+  syncPlay();
+
+  // ---------- Main loop ----------
+  let steps = mobile ? 8 : 14, simMs = 0;
+  function frame() {
+    if (running) {
+      const t0 = performance.now();
+      for (let s = 0; s < steps; s++) step();
+      simMs = simMs * 0.9 + (performance.now() - t0) * 0.1;
+      if (simMs > 11 && steps > 4) steps--;
+      else if (simMs < 7 && steps < 22) steps++;
+      if (unstable) {
+        unstable = false; resetFluid();
+        say('The flow went unstable and was restarted. Raise viscosity or lower flow speed.');
+      }
+      moveParticles(steps);
+      fpsEl.textContent = steps;
+    }
+    drawField();
+    ctx.imageSmoothingEnabled = true;
+    ctx.drawImage(off, 0, 0, C.width, C.height);
+    ctx.drawImage(trail, 0, 0);
+    if (hover) {
+      const sx = C.width / NX;
+      ctx.beginPath();
+      ctx.arc(hover[0] * sx, hover[1] * (C.height / NY), (brush + 0.5) * sx, 0, Math.PI * 2);
+      ctx.strokeStyle = tool === 'draw' ? 'rgba(95,212,196,0.9)' : 'rgba(240,180,76,0.9)';
+      ctx.lineWidth = 1.5 * dpr; ctx.stroke();
+    }
+    requestAnimationFrame(frame);
+  }
+
+  layout(true);
+  requestAnimationFrame(frame);
+})();
+</script>
